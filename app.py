@@ -1,21 +1,20 @@
-from fastapi import FastAPI, Query, HTTPException
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig
 from crawl4ai.content_filter_strategy import PruningContentFilter
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
+import streamlit as st
+import asyncio
 
-app = FastAPI()
 
-
-@app.get("/get_fit_markdown/")
-async def get_fit_markdown(url: str = Query(..., description="URL of the article to process")):
+# Function to crawl and get the fit markdown
+async def get_fit_markdown(url: str):
     """
-    Endpoint that accepts a URL and returns the "fit markdown" for the article.
+    Crawls the given URL and returns the fit markdown.
 
     Args:
-        url (str): The article URL passed as a query parameter.
+        url (str): The article URL to crawl.
 
     Returns:
-        Response containing the fit markdown or an error message.
+        dict: A dictionary containing success status, fit markdown, and length.
     """
     # Step 1: Create a pruning filter
     prune_filter = PruningContentFilter(
@@ -35,19 +34,44 @@ async def get_fit_markdown(url: str = Query(..., description="URL of the article
         result = await crawler.arun(url=url, config=config)
 
         if result.success:
-            # Return the 'fit_markdown'
             return {
                 "success": True,
                 "fit_markdown": result.markdown.fit_markdown,
                 "length": len(result.markdown.fit_markdown)
             }
         else:
-            # Handle possible crawl errors
-            raise HTTPException(status_code=400, detail=f"Error crawling the URL: {result.error_message}")
+            return {
+                "success": False,
+                "error_message": result.error_message
+            }
 
 
-# Optional: Run the app with a custom asyncio loop configuration
-if __name__ == "__main__":
-    import uvicorn
+# Streamlit UI
 
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+st.title("Markdown Extractor")
+
+# Input field for URL
+url = st.text_input("Enter the article URL:", "")
+
+# Button to trigger the markdown extraction
+if st.button("Generate Markdown"):
+    if url.strip():
+        st.info("Processing your request... Please wait.")
+
+        # Run the crawling process
+        try:
+            # Use asyncio to run the asynchronous function
+            result = asyncio.run(get_fit_markdown(url))
+
+            if result["success"]:
+                # Display the fit markdown
+                st.success(f"Successfully extracted markdown with {result['length']} characters!")
+                st.text_area("Fit Markdown:", result["fit_markdown"], height=300)
+            else:
+                # Display the error message
+                st.error(f"Failed to extract markdown: {result['error_message']}")
+
+        except Exception as e:
+            st.error(f"An unexpected error occurred: {str(e)}")
+    else:
+        st.warning("Please enter a valid URL.")
