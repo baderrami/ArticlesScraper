@@ -9,7 +9,7 @@ from openai import OpenAI
 
 # Initialize OpenAI client with DeepSeek setup
 client = OpenAI(
-    api_key="sk-74b5cb9a3e7f4b6396e97e264b9b9a4b",  # Replace with valid DeepSeek API key
+    api_key="",  #TODO: Replace with valid DeepSeek API key
     base_url="https://api.deepseek.com",
 )
 
@@ -28,23 +28,48 @@ class Article:
     category: str
 
 
-async def get_fit_markdown(url: str):
+class CrawlerService:
     """
-    Crawls the given URL and cleans the article Markdown.
+    Service class to manage the lifecycle of the AsyncWebCrawler instance.
     """
-    prune_filter = PruningContentFilter(threshold=0.45, threshold_type="dynamic", min_word_threshold=5)
-    md_generator = DefaultMarkdownGenerator(content_filter=prune_filter)
-    config = CrawlerRunConfig(markdown_generator=md_generator)
 
-    async with AsyncWebCrawler() as crawler:
-        result = await crawler.arun(url=url, config=config)
-        if result.success:
-            return {
-                "success": True,
-                "fit_markdown": result.markdown.fit_markdown.strip(),
-                "length": len(result.markdown.fit_markdown.split())
-            }
-        return {"success": False, "error_message": result.error_message}
+    def __init__(self):
+        self.crawler = None
+
+    async def start_crawler(self):
+        """Start the crawler instance if it is not already running."""
+        if not self.crawler:
+            self.crawler = AsyncWebCrawler()
+            await self.crawler.__aenter__()
+
+    async def stop_crawler(self):
+        """Stop the crawler instance if it is running."""
+        if self.crawler:
+            await self.crawler.__aexit__(None, None, None)
+            self.crawler = None
+
+    async def get_fit_markdown(self, url: str):
+        """
+        Crawls the given URL and cleans the article Markdown.
+        """
+        await self.start_crawler()  # Ensure the crawler is started
+        try:
+            # Set up the content filtering and markdown generation strategies
+            prune_filter = PruningContentFilter(threshold=0.45, threshold_type="dynamic", min_word_threshold=5)
+            md_generator = DefaultMarkdownGenerator(content_filter=prune_filter)
+            config = CrawlerRunConfig(markdown_generator=md_generator)
+
+            # Use the existing crawler to process the URL
+            result = await self.crawler.arun(url=url, config=config)
+            if result.success:
+                return {
+                    "success": True,
+                    "fit_markdown": result.markdown.fit_markdown.strip(),
+                    "length": len(result.markdown.fit_markdown.split())
+                }
+            return {"success": False, "error_message": result.error_message}
+        except Exception as e:
+            raise RuntimeError(f"Failed to fetch content: {str(e)}")
 
 
 def process_translation_to_json(cleaned_markdown: str):
@@ -79,7 +104,7 @@ def process_translation_to_json(cleaned_markdown: str):
     user_prompt = f"Content to process:\n{cleaned_markdown}"
 
     try:
-        # Send request to OpenAI API
+        # Send the content to OpenAI for translation and JSON formatting
         response = client.chat.completions.create(
             model="deepseek-chat",
             messages=[
@@ -108,9 +133,12 @@ def process_translation_to_json(cleaned_markdown: str):
             "tokens_prompt": prompt_tokens,
             "tokens_completion": completion_tokens,
         }
-
     except Exception as e:
         raise ValueError(f"Failed to process translation: {str(e)}")
+
+
+# GLOBAL: Initialize the crawler service singleton
+crawler_service = CrawlerService()
 
 # Streamlit UI
 st.title(":newspaper: Article Translator & Editor")
@@ -123,7 +151,7 @@ if st.button("Process Markdown"):
     try:
         # Step 1: Extract and clean Markdown
         st.info("Step 1: Extracting article Markdown...")
-        markdown_result = asyncio.run(get_fit_markdown(url))
+        markdown_result = asyncio.run(crawler_service.get_fit_markdown(url))
 
         if markdown_result["success"]:
             word_count = markdown_result["length"]
@@ -157,7 +185,7 @@ if st.button("Process Markdown"):
             st.write(f"- **Prompt Tokens**: {translation_result['tokens_prompt']}")
             st.write(f"- **Completion Tokens**: {translation_result['tokens_completion']}")
 
-            # Button to Save Edited Data (Simulated Save)
+            # Save Article Button
             if st.button("Save Article"):
                 updated_article = Article(
                     title=title,
@@ -178,3 +206,7 @@ if st.button("Process Markdown"):
 
     except Exception as e:
         st.error(f"An error occurred: {e}")
+
+    finally:
+        # Ensure the crawler is properly closed after each button click
+        asyncio.run(crawler_service.stop_crawler())
