@@ -45,12 +45,21 @@ async def demo_css_structured_extraction_no_schema():
 </div>
     """
 
-    # Check if schema file exists
+    # Check if schema file exists and is not empty
     schema_file_path = f"{__cur_dir__}/tmp/schema.json"
-    if os.path.exists(schema_file_path):
+    if os.path.exists(schema_file_path) and os.path.getsize(schema_file_path) > 0:
         with open(schema_file_path, "r") as f:
-            schema = json.load(f)
+            try:
+                schema = json.load(f)
+            except json.JSONDecodeError as e:
+                print(f"Error loading schema file: {e}")
+                print("Regenerating schema...")
+                schema = None
     else:
+        schema = None
+
+    # If schema is None, generate it
+    if schema is None:
         # Generate schema using LLM (one-time setup)
         schema = JsonCssExtractionStrategy.generate_schema(
             html=sample_html,
@@ -61,10 +70,13 @@ async def demo_css_structured_extraction_no_schema():
             query="From https://thehackernews.com/, I have shared a sample of one news div with a title, date, and description. Please generate a schema for this news div.",
         )
 
-    print(f"Generated schema: {json.dumps(schema, indent=2)}")
-    # Save the schema to a file , and use it for future extractions, in result for such extraction you will call LLM once
-    with open(f"{__cur_dir__}/tmp/schema.json", "w") as f:
-        json.dump(schema, f, indent=2)
+        # Ensure the tmp directory exists
+        Path(f"{__cur_dir__}/tmp").mkdir(parents=True, exist_ok=True)
+
+        # Save the schema to a file
+        with open(schema_file_path, "w") as f:
+            json.dump(schema, f, indent=2)
+            print(f"Schema saved to {schema_file_path}")
 
     # Create no-LLM extraction strategy with the generated schema
     extraction_strategy = JsonCssExtractionStrategy(schema)
@@ -84,8 +96,6 @@ async def demo_css_structured_extraction_no_schema():
                 print(json.dumps(data, indent=2))
             else:
                 print("Failed to extract structured data")
-
-
 
 async def main():
     """Run all demo functions sequentially"""
