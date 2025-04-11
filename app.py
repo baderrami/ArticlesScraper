@@ -60,12 +60,12 @@ def process_translation_to_json(cleaned_markdown: str):
     system_prompt = """
     Translate Markdown content into Arabic and structure it into JSON with the following keys:
     - "title" in Arabic.
-    - "content": List of paragraphs (translated).
+    - "content": A paragraph (translated).
     - "metadata": Word count.
     EXAMPLE OUTPUT:
     {
         "title": "عنوان المقال",
-        "content": [{"type": "paragraph", "text": "فقرة مترجمة"}],
+        "content": "المقال مترجم",
         "metadata": {"original_word_count": 10}
     }
     """
