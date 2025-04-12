@@ -106,6 +106,15 @@ streamlit run app.py
 
 This command will start the local web server and open the application in your default browser.
 
+Or create and run a docker container using the following commands
+```shell script
+   docker build -t streamlit-article-translator .
+```
+
+```shell script
+   docker run -p 8501:8501 --env-file .env streamlit-article-translator
+```
+
 #### **3. Workflow: Using the Application**
 1. Input the article URL.
 2. Press the `Process Markdown` button to fetch, clean, and translate the article.
