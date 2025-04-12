@@ -1,12 +1,12 @@
 import json
-from crawl4ai import AsyncWebCrawler, CrawlerRunConfig
-from crawl4ai.content_filter_strategy import PruningContentFilter
-from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
+from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, LLMConfig, LLMExtractionStrategy
 import streamlit as st
 import asyncio
 from dataclasses import dataclass, asdict
 from openai import OpenAI
 from dotenv import load_dotenv
+from bs4 import BeautifulSoup
+import tiktoken
 import os
 
 # Load the environment variables from the .env file
@@ -21,6 +21,9 @@ client = OpenAI(
     api_key=api_key,
     base_url=base_url,
 )
+
+# Define token limit for splitting large content
+TOKEN_LIMIT = 4000
 
 
 # Define the Article Data Transfer Object (DTO)
@@ -57,25 +60,87 @@ class CrawlerService:
             await self.crawler.__aexit__(None, None, None)
             self.crawler = None
 
+    def extract_main_content(self, html_content: str) -> str:
+        """
+        Extract main content from raw HTML using BeautifulSoup.
+        """
+        soup = BeautifulSoup(html_content, "html.parser")
+        # Target <article> tag or main content-specific div
+        article = soup.find("article") or soup.find("div", {"class": "article-body"})
+        if article:
+            return article.get_text(strip=True)
+        return "No article content found."
+
+    def split_text_to_chunks(self, text: str, max_tokens: int = TOKEN_LIMIT) -> list:
+        """
+        Split long text into chunks based on token limits.
+        """
+        tokenizer = tiktoken.get_encoding("cl100k_base")
+        tokens = tokenizer.encode(text)
+
+        chunks = []
+        for i in range(0, len(tokens), max_tokens):
+            chunk = tokens[i: i + max_tokens]
+            chunks.append(tokenizer.decode(chunk))
+
+        return chunks
+
     async def get_fit_markdown(self, url: str):
         """
-        Crawls the given URL and cleans the article Markdown.
+        Crawls the given URL, extracts and cleans the article Markdown.
         """
+        extraction_strategy = (
+            LLMExtractionStrategy(
+                llm_config=LLMConfig(
+                    provider="deepseek/deepseek-chat",
+                    api_token=api_key,
+                ),
+                instruction="""
+        Extract only the main content of the article from the provided URL, keeping its structure, meaning, and key details. Do not include any unrelated or redundant information.
+        **Include:**
+        1. The main textual content of the article.
+        2. Relevant headers, subheaders, and sections.
+        3. The main featured image or any directly related visuals.
+        4. Tabular data, lists, and quotes present within the article.
+        
+        **Exclude:**
+        1. All raw HTML, inline styles, and metadata.
+        2. Navigation elements, menus, and sidebars.
+        3. Advertisements, cookie banners, or subscription prompts.
+        4. Links to related articles, comments, or "follow us" sections.
+        5. Boilerplate content like footers and disclaimers.
+        
+        **Formatting Rules:**
+        1. Format the output as Markdown:
+           - Use proper headers (`#`, `##`, `###`).
+           - Format lists, tables, and code snippets as Markdown.
+        2. Include the main featured image as a Markdown image link.
+        3. Ensure the output is concise, well-structured, and free from unnecessary sections.
+        
+        The result should be a ready-to-use Markdown file representing only the article content, requiring no manual cleanup.
+        """,
+                chunk_token_threshold=4096,  # Adjust based on your needs
+                verbose=True
+            ))
+
+        config = CrawlerRunConfig(extraction_strategy=extraction_strategy)
+
         await self.start_crawler()  # Ensure the crawler is started
         try:
-            # Set up the content filtering and markdown generation strategies
-            prune_filter = PruningContentFilter(threshold=0.45, threshold_type="dynamic", min_word_threshold=5)
-            md_generator = DefaultMarkdownGenerator(content_filter=prune_filter)
-            config = CrawlerRunConfig(markdown_generator=md_generator)
-
-            # Use the existing crawler to process the URL
             result = await self.crawler.arun(url=url, config=config)
             if result.success:
+                # Process raw HTML
+                raw_html = result.html
+                clean_content = self.extract_main_content(raw_html)
+                chunks = self.split_text_to_chunks(clean_content)
+
                 return {
                     "success": True,
-                    "fit_markdown": result.markdown.fit_markdown.strip(),
-                    "length": len(result.markdown.fit_markdown.split())
+                    "fit_markdown": clean_content,
+                    "chunks": chunks,
+                    "length": len(clean_content.split())
                 }
+
             return {"success": False, "error_message": result.error_message}
         except Exception as e:
             raise RuntimeError(f"Failed to fetch content: {str(e)}")
@@ -96,24 +161,11 @@ def process_translation_to_json(cleaned_markdown: str):
     - "keywords": A list of primary keywords (comma-separated) in Arabic.
     - "language": Set to 'Arabic'.
     - "category": Suggested category for the article.
-
-    EXAMPLE OUTPUT:
-    {
-        "title": "عنوان المقال",
-        "content": "هذا هو النص الكامل للمقال المترجم إلى اللغة العربية.",
-        "summary": "ملخص المقال باللغة العربية.",
-        "author": "اسم الكاتب (اختياري)",
-        "date": "YYYY-MM-DD",
-        "tags": "أمن, تحديثات, برمجيات",
-        "keywords": "أدوبي, ثغرة, كولدفيون",
-        "language": "Arabic",
-        "category": "Technology"
-    }
     """
     user_prompt = f"Content to process:\n{cleaned_markdown}"
 
     try:
-        # Send the content to OpenAI for translation and JSON formatting
+        # Send the content to deepseek again for translation and JSON formatting
         response = client.chat.completions.create(
             model="deepseek-chat",
             messages=[
@@ -124,23 +176,16 @@ def process_translation_to_json(cleaned_markdown: str):
             max_tokens=1500,
         )
 
-        # Extract token usage using dot notation
-        token_usage = response.usage
-        total_tokens = token_usage.total_tokens
-        prompt_tokens = token_usage.prompt_tokens
-        completion_tokens = token_usage.completion_tokens
+        # Extract token usage and handle JSON response
+        response_json = json.loads(response.choices[0].message.content)
 
-        # Parse the JSON response content
-        json_response = json.loads(response.choices[0].message.content)
-
-        # Map the JSON response to the Article DTO
-        article = Article(**json_response)
+        article = Article(**response_json)
 
         return {
-            "article": article,  # Parsed Article DTO
-            "tokens_used": total_tokens,
-            "tokens_prompt": prompt_tokens,
-            "tokens_completion": completion_tokens,
+            "article": article,
+            "tokens_used": response.usage.total_tokens,
+            "tokens_prompt": response.usage.prompt_tokens,
+            "tokens_completion": response.usage.completion_tokens,
         }
     except Exception as e:
         raise ValueError(f"Failed to process translation: {str(e)}")
@@ -158,25 +203,23 @@ url = st.text_input("Article URL", placeholder="https://example.com/article")
 
 if st.button("Process Markdown"):
     try:
-        # Step 1: Extract and clean Markdown
-        st.info("Step 1: Extracting article Markdown...")
+        st.info("Extracting and processing the article...")
         markdown_result = asyncio.run(crawler_service.get_fit_markdown(url))
 
         if markdown_result["success"]:
-            word_count = markdown_result["length"]
-            st.success(f"Markdown successfully extracted! Word count: {word_count}")
-
-            # Step 2: Display Cleaned Markdown with Save Option
+            st.success(f"Article Markdown extracted successfully! Word count: {markdown_result['length']}")
             cleaned_markdown = markdown_result["fit_markdown"]
-            st.markdown("### :scroll: Cleaned Markdown")
-            st.text_area("Cleaned Markdown", cleaned_markdown, height=150)
+            st.text_area("Cleaned Markdown", cleaned_markdown, height=200)
 
-            # Step 3: Process Translation and Format into Article DTO
-            st.info("Step 2: Translating and creating editable fields...")
+            chunks = markdown_result["chunks"]
+
+            st.info("Translating and converting Markdown to JSON...")
             translation_result = process_translation_to_json(cleaned_markdown)
             article = translation_result["article"]  # Mapped to Article DTO
             tokens_used = translation_result["tokens_used"]
 
+            # Display JSON output
+            st.json(asdict(article))
             # Step 4: Editable Fields for the Article DTO
             st.markdown("### :pencil: Editable Article Fields")
             title = st.text_input("Title (Arabic)", value=article.title)
@@ -211,10 +254,10 @@ if st.button("Process Markdown"):
                 st.json(asdict(updated_article))  # Show updated article as JSON
 
         else:
-            st.error(f"Failed to extract article: {markdown_result['error_message']}")
+            st.error(f"Extraction failed: {markdown_result['error_message']}")
 
     except Exception as e:
-        st.error(f"An error occurred: {e}")
+        st.error(f"An error occurred: {str(e)}")
 
     finally:
         # Ensure the crawler is properly closed after each button click
