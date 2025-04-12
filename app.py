@@ -6,11 +6,20 @@ import streamlit as st
 import asyncio
 from dataclasses import dataclass, asdict
 from openai import OpenAI
+from dotenv import load_dotenv
+import os
+
+# Load the environment variables from the .env file
+load_dotenv()
+
+# Retrieve the API key and Base URL from environment variables
+api_key = os.getenv("API_KEY")
+base_url = os.getenv("BASE_URL")
 
 # Initialize OpenAI client with DeepSeek setup
 client = OpenAI(
-    api_key="",  #TODO: Replace with valid DeepSeek API key
-    base_url="https://api.deepseek.com",
+    api_key=api_key,
+    base_url=base_url,
 )
 
 
